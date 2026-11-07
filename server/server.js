@@ -1,5 +1,9 @@
 
 require("dotenv").config();
+console.log(
+  "BREVO_FROM_EMAIL loaded:",
+  Boolean(process.env.BREVO_FROM_EMAIL)
+);
 
 const express = require("express");
 const cors = require("cors");
