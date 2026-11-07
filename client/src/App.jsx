@@ -1,6 +1,7 @@
 ﻿import { useState } from "react";
 
 import Login from "./Login";
+import ResetPassword from "./ResetPassword";
 import Register from "./Register";
 import Dashboard from "./Dashboard";
 import MeetingSetup from "./MeetingSetup";
@@ -70,6 +71,19 @@ function App() {
     setPage("dashboard");
   };
 
+  const hasResetToken = new URLSearchParams(window.location.search).has("resetToken");
+
+  if (hasResetToken) {
+    return (
+      <div className="app">
+        <ResetPassword onBackToLogin={() => {
+          window.history.replaceState({}, document.title, window.location.pathname);
+          window.location.reload();
+        }} />
+      </div>
+    );
+  }
+
   if (!user) {
     return (
       <div className="app">
@@ -128,3 +142,4 @@ function App() {
 }
 
 export default App;
+
