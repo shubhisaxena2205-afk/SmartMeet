@@ -1,12 +1,20 @@
-
-const User = require("../models/User");
+﻿const User = require("../models/User");
 const bcrypt = require("bcryptjs");
 const jwt = require("jsonwebtoken");
 const crypto = require("crypto");
-const { Resend } = require("resend");
 
 const normalizeEmail = (email) =>
     String(email || "").trim().toLowerCase();
+
+function escapeHtml(value) {
+    return String(value).replace(/[&<>"']/g, (char) => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+    })[char]);
+}
 
 // REGISTER
 const registerUser = async (req, res) => {
@@ -95,7 +103,7 @@ const loginUser = async (req, res) => {
     }
 };
 
-// FORGOT PASSWORD USING RESEND API
+// FORGOT PASSWORD USING BREVO API
 const forgotPassword = async (req, res) => {
     try {
         const email = normalizeEmail(req.body.email);
@@ -109,13 +117,18 @@ const forgotPassword = async (req, res) => {
         const user = await User.findOne({ email });
 
         if (user) {
-            const apiKey = process.env.RESEND_API_KEY;
+            const apiKey = process.env.BREVO_API_KEY;
+            const senderEmail = process.env.BREVO_FROM_EMAIL;
+            const senderName =
+                process.env.BREVO_FROM_NAME || "SmartMeet";
 
             if (!apiKey) {
-                throw new Error("RESEND_API_KEY is not configured.");
+                throw new Error("BREVO_API_KEY is not configured.");
             }
 
-            const resend = new Resend(apiKey);
+            if (!senderEmail) {
+                throw new Error("BREVO_FROM_EMAIL is not configured.");
+            }
 
             const rawToken = crypto.randomBytes(32).toString("hex");
 
@@ -137,18 +150,57 @@ const forgotPassword = async (req, res) => {
                 "http://localhost:5173"
             ).replace(/\/$/, "");
 
-            const resetUrl = `${frontendUrl}/?resetToken=${rawToken}`;
+            const resetUrl =
+                `${frontendUrl}/?resetToken=${rawToken}`;
 
-            const sender =
-                process.env.RESEND_FROM ||
-                "SmartMeet <onboarding@resend.dev>";
+            const safeName = escapeHtml(user.name);
 
-            const { data, error } = await resend.emails.send({
-                from: sender,
-                to: [user.email],
-                subject: "Reset your SmartMeet password",
+            const htmlContent = `
+                <div style="font-family:Arial,sans-serif;line-height:1.6;color:#202124;max-width:560px;margin:auto">
+                    <h2>Reset your SmartMeet password</h2>
+                    <p>Hello ${safeName},</p>
+                    <p>
+                        We received a request to reset your SmartMeet password.
+                        This secure link expires in
+                        <strong>15 minutes</strong> and can only be used once.
+                    </p>
+                    <p>
+                        <a href="${resetUrl}"
+                        style="display:inline-block;padding:12px 20px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px">
+                            Reset password
+                        </a>
+                    </p>
+                    <p>If the button does not work, copy this link:</p>
+                    <p><a href="${resetUrl}">${resetUrl}</a></p>
+                    <p>
+                        If you did not request this, you can safely ignore
+                        this email.
+                    </p>
+                    <p>SmartMeet</p>
+                </div>
+            `;
 
-                text: `Hello ${user.name},
+            const response = await fetch(
+                "https://api.brevo.com/v3/smtp/email",
+                {
+                    method: "POST",
+                    headers: {
+                        "accept": "application/json",
+                        "api-key": apiKey,
+                        "content-type": "application/json"
+                    },
+                    body: JSON.stringify({
+                        sender: {
+                            name: senderName,
+                            email: senderEmail
+                        },
+                        to: [{
+                            email: user.email,
+                            name: user.name
+                        }],
+                        subject: "Reset your SmartMeet password",
+                        htmlContent,
+                        textContent: `Hello ${user.name},
 
 We received a request to reset your SmartMeet password.
 
@@ -158,60 +210,44 @@ ${resetUrl}
 
 If you did not request this, you can ignore this email.
 
-SmartMeet`,
+SmartMeet`
+                    })
+                }
+            );
 
-                html: `
-                <div style="font-family:Arial,sans-serif;line-height:1.6;color:#202124;max-width:560px;margin:auto">
-                    <h2>Reset your SmartMeet password</h2>
-                    <p>Hello ${escapeHtml(user.name)},</p>
-                    <p>
-                        We received a request to reset your SmartMeet password.
-                        This secure link expires in <strong>15 minutes</strong>
-                        and can only be used once.
-                    </p>
-                    <p>
-                        <a href="${resetUrl}"
-                        style="display:inline-block;padding:12px 20px;background:#7c3aed;color:#fff;text-decoration:none;border-radius:8px">
-                        Reset password
-                        </a>
-                    </p>
-                    <p>If the button does not work, copy this link:</p>
-                    <p><a href="${resetUrl}">${resetUrl}</a></p>
-                    <p>If you did not request this, you can safely ignore this email.</p>
-                    <p>SmartMeet</p>
-                </div>
-                `
-            });
+            const result = await response.json().catch(() => ({}));
 
-            if (error) {
-                console.error("Resend Email Error:", error);
-                throw new Error(error.message || "Email delivery failed.");
+            if (!response.ok) {
+                console.error("Brevo Email Error:", result);
+
+                user.resetPasswordToken = undefined;
+                user.resetPasswordExpires = undefined;
+                await user.save();
+
+                throw new Error(
+                    result.message || "Brevo email delivery failed."
+                );
             }
 
-            console.log("Password reset email accepted by Resend:", data?.id);
+            console.log(
+                "Password reset email accepted by Brevo:",
+                result.messageId
+            );
         }
 
         return res.status(200).json({
-            message: "If an account with that email exists, a password reset link has been sent. Please check your inbox."
+            message:
+                "If an account with that email exists, a password reset link has been sent. Please check your inbox."
         });
-
     } catch (error) {
         console.error("Forgot Password Error:", error);
+
         return res.status(503).json({
-            message: "We could not send the reset email right now. Please try again later."
+            message:
+                "We could not send the reset email right now. Please try again later."
         });
     }
 };
-
-function escapeHtml(value) {
-    return String(value).replace(/[&<>"']/g, (char) => ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;"
-    })[char]);
-}
 
 // RESET PASSWORD
 const resetPassword = async (req, res) => {
@@ -229,7 +265,8 @@ const resetPassword = async (req, res) => {
 
         if (!strongPassword) {
             return res.status(400).json({
-                message: "Password must contain 6+ characters, uppercase, lowercase, number and symbol."
+                message:
+                    "Password must contain 6+ characters, uppercase, lowercase, number and symbol."
             });
         }
 
@@ -245,7 +282,8 @@ const resetPassword = async (req, res) => {
 
         if (!user) {
             return res.status(400).json({
-                message: "This reset link is invalid or has expired. Please request a new one."
+                message:
+                    "This reset link is invalid or has expired. Please request a new one."
             });
         }
 
@@ -256,11 +294,12 @@ const resetPassword = async (req, res) => {
         await user.save();
 
         return res.status(200).json({
-            message: "Your password has been reset successfully. You can now log in."
+            message:
+                "Your password has been reset successfully. You can now log in."
         });
-
     } catch (error) {
         console.error("Reset Password Error:", error);
+
         return res.status(500).json({
             message: "Could not reset password. Please try again."
         });
@@ -273,4 +312,3 @@ module.exports = {
     forgotPassword,
     resetPassword
 };
-
