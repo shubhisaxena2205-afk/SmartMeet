@@ -24,3 +24,9 @@ Thumbs.db
 
 # Temporary files
 *.local
+
+# Local backup files
+server/server_backup.js
+
+# Allow environment example files
+!**/.env.example
